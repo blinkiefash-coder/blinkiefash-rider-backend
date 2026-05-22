@@ -83,7 +83,7 @@ exports.getAvailableOrders = async (req, res) => {
                 cos(radians(ds.lat)) * cos(radians(a.lat)) *
                 cos(radians(a.lng) - radians(ds.lng)) +
                 sin(radians(ds.lat)) * sin(radians(a.lat))
-              ))))::numeric, 1)
+              ))) * 1.6)::numeric, 1)
             ELSE NULL
           END AS km
       ) dist_calc
