@@ -55,6 +55,16 @@ sequelize.authenticate()
        ADD COLUMN IF NOT EXISTS delivery_photo_url TEXT`,
       { type: QueryTypes.RAW }
     ).catch(() => {});
+    
+    // Populate NULL user_id values in rider_documents by looking up from riders
+    await sequelize.query(
+      `UPDATE rider_documents rd 
+       SET user_id = r.user_id 
+       FROM "Riders" r 
+       WHERE rd.rider_id = r.id AND rd.user_id IS NULL`,
+      { type: QueryTypes.UPDATE }
+    ).catch((err) => console.log('Could not auto-update user_id:', err.message));
+    
     app.listen(PORT, () => {
       console.log(`Server running on port ${PORT}`);
     });
