@@ -151,7 +151,9 @@ exports.acceptOrder = async (req, res) => {
         const a = Math.sin(dLat / 2) ** 2 +
           Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
           Math.sin(dLon / 2) ** 2;
-        distanceKm = Math.round(6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * 10) / 10;
+        // Haversine gives straight-line; multiply by 1.6 road factor for estimated road distance
+        const straightLine = 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        distanceKm = Math.round(straightLine * 1.6 * 10) / 10;
         if      (distanceKm <=  5) riderFee = 59;
         else if (distanceKm <= 10) riderFee = 69;
         else if (distanceKm <= 15) riderFee = 79;
@@ -440,7 +442,8 @@ exports.tryBuyComplete = async (req, res) => {
       `UPDATE deliveries SET status = 'completed', completed_at = NOW() WHERE id = :id`,
       { replacements: { id }, type: QueryTypes.UPDATE }
     );
-    // Credit earnings on 'kept' (delivered)
+    // Credit earnings on 'kept' (delivered), minimum cancellation fee on 'returned'
+    const { RiderPayout } = require('../models');
     if (decision === 'kept') {
       const feeRow = await sequelize.query(
         `SELECT delivery_fee FROM deliveries WHERE id = :id`,
@@ -452,13 +455,24 @@ exports.tryBuyComplete = async (req, res) => {
           `UPDATE "Riders" SET earnings_balance = COALESCE(earnings_balance,0) + :fee WHERE id = :riderId`,
           { replacements: { fee, riderId: rows[0].rider_id }, type: QueryTypes.UPDATE }
         );
-        const { RiderPayout } = require('../models');
         await RiderPayout.create({
           rider_id: rows[0].rider_id, amount: fee,
           payout_date: new Date(), status: 'earned',
           reference: `delivery:${id}`,
         });
       }
+    } else if (decision === 'returned') {
+      // Rider still gets a minimum return fee for effort (even if customer rejected items)
+      const MIN_RETURN_FEE = 30;
+      await sequelize.query(
+        `UPDATE "Riders" SET earnings_balance = COALESCE(earnings_balance,0) + :fee WHERE id = :riderId`,
+        { replacements: { fee: MIN_RETURN_FEE, riderId: rows[0].rider_id }, type: QueryTypes.UPDATE }
+      );
+      await RiderPayout.create({
+        rider_id: rows[0].rider_id, amount: MIN_RETURN_FEE,
+        payout_date: new Date(), status: 'earned',
+        reference: `return:${id}`,
+      });
     }
     res.json({ success: true, decision });
   } catch (err) {
