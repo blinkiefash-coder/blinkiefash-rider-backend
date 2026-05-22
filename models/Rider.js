@@ -18,11 +18,10 @@ const Rider = sequelize.define('Rider', {
   last_active: Sequelize.DATE,
   earnings_balance: { type: Sequelize.DECIMAL(12,2), defaultValue: 0 },
   fcm_token: Sequelize.STRING,
-  created_at: { type: Sequelize.DATE, defaultValue: Sequelize.NOW },
-  updated_at: Sequelize.DATE,
 }, {
   tableName: 'Riders',
-  timestamps: false,
+  timestamps: true,   // DB has camelCase createdAt/updatedAt columns
+  underscored: false, // do NOT convert to snake_case
 });
 
 module.exports = Rider;
