@@ -1,6 +1,5 @@
 // Allow self-signed / intermediate TLS certs (Neon DB + Cloudinary on local network)
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
-process.env.FIREBASE_PRIVATE_KEY = "";
 const https = require('https');
 https.globalAgent.options.rejectUnauthorized = false;
 

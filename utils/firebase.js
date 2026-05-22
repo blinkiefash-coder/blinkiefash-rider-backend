@@ -1,37 +1,41 @@
-// const admin = require('firebase-admin');
+const admin = require('firebase-admin');
 
-// if (!admin.apps.length) {
-//   admin.initializeApp({
-//     credential: admin.credential.cert({
-//       projectId: process.env.FIREBASE_PROJECT_ID,
-//       clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-//       privateKey: (process.env.FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
-//     }),
-//   });
-// }
+let firebaseApp;
 
-// // ✅ send push
-// async function sendPush(fcmToken, { title, body, data = {} }) {
-//   if (!fcmToken) return;
+// Initialize Firebase Admin if credentials are available
+if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY) {
+  try {
+    if (!admin.apps.length) {
+      firebaseApp = admin.initializeApp({
+        credential: admin.credential.cert({
+          projectId: process.env.FIREBASE_PROJECT_ID,
+          clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+          privateKey: (process.env.FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
+        }),
+      });
+      console.log('Firebase Admin initialized successfully');
+    }
+  } catch (err) {
+    console.error('Firebase initialization failed:', err.message);
+  }
+}
 
-//   try {
-//     await admin.messaging().send({
-//       token: fcmToken,
-//       notification: { title, body },
-//       data: Object.fromEntries(
-//         Object.entries(data).map(([k, v]) => [k, String(v)])
-//       ),
-//     });
-//   } catch (err) {
-//     console.error('FCM error:', err.message);
-//   }
-// }
+// Send push notification
+async function sendPush(fcmToken, { title, body, data = {} }) {
+  if (!fcmToken || !firebaseApp) return;
 
-// module.exports = { sendPush };
+  try {
+    await admin.messaging().send({
+      token: fcmToken,
+      notification: { title, body },
+      data: Object.fromEntries(
+        Object.entries(data).map(([k, v]) => [k, String(v)])
+      ),
+    });
+  } catch (err) {
+    console.error('FCM error:', err.message);
+  }
+}
 
-// TEMP DISABLED FIREBASE
-
-module.exports = {
-  sendPush: async () => {},
-};
+module.exports = { sendPush };
 ``
