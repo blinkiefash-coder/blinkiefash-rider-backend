@@ -5,18 +5,15 @@ if (!admin.apps.length) {
     credential: admin.credential.cert({
       projectId: process.env.FIREBASE_PROJECT_ID,
       clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-      // newlines in the env var must be real newlines
       privateKey: (process.env.FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
     }),
   });
 }
 
-/**
- * Send an FCM push notification to a single device token.
- * Silently swallows errors so a missing/expired token never breaks the main flow.
- */
+// ✅ send push
 async function sendPush(fcmToken, { title, body, data = {} }) {
   if (!fcmToken) return;
+
   try {
     await admin.messaging().send({
       token: fcmToken,
@@ -24,16 +21,9 @@ async function sendPush(fcmToken, { title, body, data = {} }) {
       data: Object.fromEntries(
         Object.entries(data).map(([k, v]) => [k, String(v)])
       ),
-      android: {
-        priority: 'high',
-        notification: { sound: 'default', channelId: 'blinkiefash_orders' },
-      },
-      apns: {
-        payload: { aps: { sound: 'default', badge: 1 } },
-      },
     });
   } catch (err) {
-    console.error('FCM send error:', err.message);
+    console.error('FCM error:', err.message);
   }
 }
 
