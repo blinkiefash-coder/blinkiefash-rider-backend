@@ -2,6 +2,7 @@ const { Delivery, DeliveryTracking, Rider } = require('../models');
 const { sequelize } = require('../db');
 const { QueryTypes } = require('sequelize');
 const { sendPush } = require('../utils/firebase');
+const { getRoadDistance } = require('../utils/distance');
 
 exports.getDeliveries = async (req, res) => {
   try {
@@ -146,14 +147,8 @@ exports.acceptOrder = async (req, res) => {
       if (drop_lat && drop_lng && store_lat && store_lng) {
         const lat1 = parseFloat(store_lat), lon1 = parseFloat(store_lng);
         const lat2 = parseFloat(drop_lat),  lon2 = parseFloat(drop_lng);
-        const dLat = (lat2 - lat1) * Math.PI / 180;
-        const dLon = (lon2 - lon1) * Math.PI / 180;
-        const a = Math.sin(dLat / 2) ** 2 +
-          Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-          Math.sin(dLon / 2) ** 2;
-        // Haversine gives straight-line; multiply by 1.6 road factor for estimated road distance
-        const straightLine = 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-        distanceKm = Math.round(straightLine * 1.6 * 10) / 10;
+        // Uses Google Distance Matrix API if GOOGLE_MAPS_API_KEY is set, else Haversine×1.6
+        distanceKm = await getRoadDistance(lat1, lon1, lat2, lon2);
         if      (distanceKm <=  5) riderFee = 59;
         else if (distanceKm <= 10) riderFee = 69;
         else if (distanceKm <= 15) riderFee = 79;
