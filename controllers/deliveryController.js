@@ -262,13 +262,14 @@ exports.updateLocation = async (req, res) => {
   res.json({ message: 'Location updated' });
 };
 
-// ── Mark arrived: generate OTP, push to customer ─────────────────────────────
+// ── Mark arrived: fetch existing OTP (set at checkout), push to customer ─────
 exports.markArrived = async (req, res) => {
   const { id } = req.params; // delivery id
+  console.log(`🎯 [markArrived] Called for delivery ID: ${id}`);
   try {
     // Only the owning rider may call this
     const rows = await sequelize.query(
-      `SELECT d.order_id, o.user_id, d.rider_id
+      `SELECT d.order_id, o.user_id, o.delivery_otp, d.rider_id
        FROM deliveries d JOIN orders o ON o.id = d.order_id
        WHERE d.id = :id`,
       { replacements: { id }, type: QueryTypes.SELECT }
@@ -277,20 +278,18 @@ exports.markArrived = async (req, res) => {
     if (rows[0].rider_id !== req.user.id)
       return res.status(403).json({ success: false, message: 'Forbidden' });
 
-    const { order_id, user_id } = rows[0];
+    const { order_id, user_id, delivery_otp: otp } = rows[0];
+    if (!otp) {
+      console.warn(`⚠️  [markArrived] No delivery_otp found for order ${order_id}`);
+      return res.status(400).json({ success: false, message: 'OTP not generated for this order' });
+    }
 
-    // Generate 4-digit OTP
-    const otp = String(Math.floor(1000 + Math.random() * 9000));
-
-    // Update delivery status + store OTP on order
+    // Update delivery status only — OTP was already generated at checkout
     await sequelize.query(
       `UPDATE deliveries SET status = 'arrived' WHERE id = :id`,
       { replacements: { id }, type: QueryTypes.UPDATE }
     );
-    await sequelize.query(
-      `UPDATE orders SET delivery_otp = :otp WHERE id = :orderId`,
-      { replacements: { otp, orderId: order_id }, type: QueryTypes.UPDATE }
-    );
+    console.log(`✅ [markArrived] Delivery ${id} status set to 'arrived'. Using existing OTP: ${otp}`);
 
     // Send push to customer — wrapped in try/catch so missing column never crashes the endpoint
     try {
@@ -307,7 +306,7 @@ exports.markArrived = async (req, res) => {
       }
     } catch (_) { /* push is best-effort */ }
 
-    res.json({ success: true, message: 'Marked arrived. OTP sent to customer.' });
+    res.json({ success: true, message: 'Marked arrived. OTP sent to customer.', delivery_otp: otp });
   } catch (err) {
     console.error('markArrived error:', err.message);
     res.status(500).json({ success: false, message: err.message });
