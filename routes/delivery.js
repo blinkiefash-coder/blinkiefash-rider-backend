@@ -13,6 +13,7 @@ router.post('/:id/location', auth, deliveryController.updateLocation);
 router.post('/:id/store-arrived', auth, deliveryController.markStoreArrived);
 router.post('/:id/verify-store-otp', auth, deliveryController.verifyStoreOtp);
 router.post('/:id/arrived', auth, deliveryController.markArrived);
+router.post('/:id/confirm-arrival', auth, deliveryController.confirmArrival);
 router.post('/:id/verify-otp', auth, deliveryController.verifyOtp);
 router.post('/:id/try-buy-select', auth, deliveryController.tryBuySelect);
 router.post('/:id/try-buy-complete', auth, deliveryController.tryBuyComplete);

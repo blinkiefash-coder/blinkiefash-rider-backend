@@ -313,6 +313,32 @@ exports.markArrived = async (req, res) => {
   }
 };
 
+// ── Confirm delivery at customer \u2014 no OTP required from customer ────────────
+exports.confirmArrival = async (req, res) => {
+  const { id } = req.params; // delivery id
+  try {
+    const rows = await sequelize.query(
+      `SELECT d.rider_id, d.order_id, o.is_try_order
+       FROM deliveries d JOIN orders o ON o.id = d.order_id
+       WHERE d.id = :id`,
+      { replacements: { id }, type: QueryTypes.SELECT }
+    );
+    if (!rows.length) return res.status(404).json({ success: false, message: 'Delivery not found' });
+    if (rows[0].rider_id !== req.user.id)
+      return res.status(403).json({ success: false, message: 'Forbidden' });
+
+    await sequelize.query(
+      `UPDATE orders SET otp_verified_at = NOW() WHERE id = :orderId`,
+      { replacements: { orderId: rows[0].order_id }, type: QueryTypes.UPDATE }
+    );
+
+    res.json({ success: true, is_try_order: rows[0].is_try_order ?? false });
+  } catch (err) {
+    console.error('confirmArrival error:', err.message);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 // ── Verify OTP entered by rider ───────────────────────────────────────────────
 exports.verifyOtp = async (req, res) => {
   const { id } = req.params; // delivery id
