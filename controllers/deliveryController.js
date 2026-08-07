@@ -13,6 +13,7 @@ exports.getDeliveries = async (req, res) => {
         o.status      AS order_status,
         o.total_amount,
         o.confirmed_at,
+        o.pickup_route,
         a.address_line, a.city, a.pincode,
         a.lat         AS drop_lat, a.lng AS drop_lng,
         ds.name       AS store_name, ds.address AS store_address,
@@ -48,6 +49,7 @@ exports.getAvailableOrders = async (req, res) => {
     const rows = await sequelize.query(`
       SELECT
         o.id, o.status, o.total_amount, o.created_at,
+        o.pickup_route,
         a.address_line, a.city, a.pincode,
         a.lat AS drop_lat, a.lng AS drop_lng,
         ds.name AS store_name, ds.address AS store_address,
@@ -75,17 +77,20 @@ exports.getAvailableOrders = async (req, res) => {
       JOIN products p      ON p.id = v.product_id
       CROSS JOIN LATERAL (
         SELECT
-          CASE
-            WHEN a.lat IS NOT NULL AND a.lng IS NOT NULL
-                 AND ds.lat IS NOT NULL AND ds.lng IS NOT NULL
-            THEN ROUND(
-              (6371 * acos(GREATEST(-1, LEAST(1,
-                cos(radians(ds.lat)) * cos(radians(a.lat)) *
-                cos(radians(a.lng) - radians(ds.lng)) +
-                sin(radians(ds.lat)) * sin(radians(a.lat))
-              ))) * 1.6)::numeric, 1)
-            ELSE NULL
-          END AS km
+          COALESCE(
+            o.route_distance_km,
+            CASE
+              WHEN a.lat IS NOT NULL AND a.lng IS NOT NULL
+                   AND ds.lat IS NOT NULL AND ds.lng IS NOT NULL
+              THEN ROUND(
+                (6371 * acos(GREATEST(-1, LEAST(1,
+                  cos(radians(ds.lat)) * cos(radians(a.lat)) *
+                  cos(radians(a.lng) - radians(ds.lng)) +
+                  sin(radians(ds.lat)) * sin(radians(a.lat))
+                ))) * 1.6)::numeric, 1)
+              ELSE NULL
+            END
+          ) AS km
       ) dist_calc
       WHERE o.status = 'confirmed'
         AND NOT EXISTS (
@@ -133,7 +138,8 @@ exports.acceptOrder = async (req, res) => {
     // Rider payout tiers: ≤5km ₹30 | ≤10km ₹40 | ≤15km ₹50 | ≤20km ₹60 | ≤25km ₹70 | >25km ₹80
     const geoRows = await sequelize.query(
       `SELECT a.lat AS drop_lat, a.lng AS drop_lng,
-              ds.lat AS store_lat, ds.lng AS store_lng
+              ds.lat AS store_lat, ds.lng AS store_lng,
+              o.route_distance_km, o.pickup_route
        FROM orders o
        JOIN addresses a ON a.id = o.address_id
        LEFT JOIN dark_stores ds ON ds.id = o.dark_store_id
@@ -143,12 +149,20 @@ exports.acceptOrder = async (req, res) => {
     let distanceKm = null;
     let riderFee = 59; // base payout
     if (geoRows.length) {
-      const { drop_lat, drop_lng, store_lat, store_lng } = geoRows[0];
-      if (drop_lat && drop_lng && store_lat && store_lng) {
+      const { drop_lat, drop_lng, store_lat, store_lng, route_distance_km, pickup_route } = geoRows[0];
+      const isMultiStore = Array.isArray(pickup_route) && pickup_route.length > 1;
+      if (isMultiStore && route_distance_km != null) {
+        // Order spans multiple dark stores — use the pre-planned total pickup
+        // route distance (store→store legs + final store→customer leg)
+        // instead of a single store's direct distance.
+        distanceKm = parseFloat(route_distance_km);
+      } else if (drop_lat && drop_lng && store_lat && store_lng) {
         const lat1 = parseFloat(store_lat), lon1 = parseFloat(store_lng);
         const lat2 = parseFloat(drop_lat),  lon2 = parseFloat(drop_lng);
         // Uses Google Distance Matrix API if GOOGLE_MAPS_API_KEY is set, else Haversine×1.6
         distanceKm = await getRoadDistance(lat1, lon1, lat2, lon2);
+      }
+      if (distanceKm != null) {
         if      (distanceKm <=  5) riderFee = 59;
         else if (distanceKm <= 10) riderFee = 69;
         else if (distanceKm <= 15) riderFee = 79;
@@ -508,12 +522,14 @@ exports.getDeliveryDetail = async (req, res) => {
     const rows = await sequelize.query(
       `SELECT d.id AS delivery_id, d.status AS delivery_status,
               d.store_pickup_otp, d.store_pickup_verified_at, d.delivery_photo_url,
+              d.pickup_progress,
               o.id AS order_id, o.status AS order_status,
               o.delivery_otp, o.otp_verified_at,
               o.is_try_order, o.try_buy_mode,
               o.try_buy_started_at, o.try_buy_deadline, o.try_buy_decision,
               o.created_at AS started_at, o.confirmed_at,
               o.total_amount, o.final_amount,
+              o.pickup_route, o.route_distance_km,
               a.lat AS drop_lat, a.lng AS drop_lng,
               a.address_line, a.city, a.pincode,
               u.name AS customer_name, u.phone AS customer_phone
@@ -532,19 +548,23 @@ exports.getDeliveryDetail = async (req, res) => {
 };
 
 // ── Mark arrived at dark store — generate store pickup OTP ───────────────────
+// For single-store orders this behaves exactly as before (one OTP for the
+// whole delivery). For orders spanning multiple dark stores, the rider calls
+// this endpoint once per stop; the backend tracks progress in
+// deliveries.pickup_progress and generates an OTP only for the current
+// (first-unverified) stop.
 exports.markStoreArrived = async (req, res) => {
   const { id } = req.params; // delivery id
   try {
     const rows = await sequelize.query(
-      `SELECT d.rider_id, d.order_id FROM deliveries d WHERE d.id = :id`,
+      `SELECT d.rider_id, d.order_id, d.pickup_progress, o.pickup_route
+       FROM deliveries d JOIN orders o ON o.id = d.order_id
+       WHERE d.id = :id`,
       { replacements: { id }, type: QueryTypes.SELECT }
     );
     if (!rows.length) return res.status(404).json({ success: false, message: 'Delivery not found' });
     if (rows[0].rider_id !== req.user.id)
       return res.status(403).json({ success: false, message: 'Forbidden' });
-
-    // Generate 4-digit store OTP
-    const otp = String(Math.floor(1000 + Math.random() * 9000));
 
     // Store OTP in deliveries using ALTER-safe approach with DO block
     // First try to update; if column doesn't exist it will silently fail and
@@ -554,19 +574,54 @@ exports.markStoreArrived = async (req, res) => {
         `ALTER TABLE deliveries
          ADD COLUMN IF NOT EXISTS store_pickup_otp VARCHAR(4),
          ADD COLUMN IF NOT EXISTS store_pickup_verified_at TIMESTAMPTZ,
-         ADD COLUMN IF NOT EXISTS delivery_photo_url TEXT`,
+         ADD COLUMN IF NOT EXISTS delivery_photo_url TEXT,
+         ADD COLUMN IF NOT EXISTS pickup_progress JSONB`,
         { type: QueryTypes.RAW }
       );
     } catch (_) { /* columns may already exist */ }
 
+    const { pickup_route: pickupRoute } = rows[0];
+    const isMultiStore = Array.isArray(pickupRoute) && pickupRoute.length > 1;
+
+    if (!isMultiStore) {
+      // Generate 4-digit store OTP (unchanged single-store behavior)
+      const otp = String(Math.floor(1000 + Math.random() * 9000));
+      await sequelize.query(
+        `UPDATE deliveries SET store_pickup_otp = :otp WHERE id = :id`,
+        { replacements: { otp, id }, type: QueryTypes.UPDATE }
+      );
+      return res.json({ success: true, message: 'Store OTP generated. Give it to the rider.' });
+    }
+
+    // Multi-store: seed pickup_progress on the first call for this delivery
+    let pickupProgress = Array.isArray(rows[0].pickup_progress) ? rows[0].pickup_progress : [];
+    if (!pickupProgress.length) {
+      pickupProgress = pickupRoute.map((s) => ({
+        storeId: s.storeId, name: s.name, lat: s.lat, lng: s.lng,
+        sequence: s.sequence, otp: null, verifiedAt: null,
+      }));
+    }
+
+    const stopIdx = pickupProgress.findIndex((s) => !s.verifiedAt);
+    if (stopIdx === -1) {
+      return res.status(400).json({ success: false, message: 'All store pickups already completed' });
+    }
+
+    const otp = String(Math.floor(1000 + Math.random() * 9000));
+    pickupProgress[stopIdx] = { ...pickupProgress[stopIdx], otp };
+
     await sequelize.query(
-      `UPDATE deliveries SET store_pickup_otp = :otp WHERE id = :id`,
-      { replacements: { otp, id }, type: QueryTypes.UPDATE }
+      `UPDATE deliveries SET pickup_progress = :progress WHERE id = :id`,
+      { replacements: { progress: JSON.stringify(pickupProgress), id }, type: QueryTypes.UPDATE }
     );
 
-    // Notify admin (best-effort push to store FCM topic if set up)
-    // For now just return the success with OTP so admin panel can show it
-    res.json({ success: true, message: 'Store OTP generated. Give it to the rider.' });
+    res.json({
+      success: true,
+      message: `Store OTP generated for ${pickupProgress[stopIdx].name || 'this store'}. Give it to the rider.`,
+      stopIndex: stopIdx,
+      totalStops: pickupProgress.length,
+      storeName: pickupProgress[stopIdx].name,
+    });
   } catch (err) {
     console.error('markStoreArrived error:', err.message);
     res.status(500).json({ success: false, message: err.message });
@@ -574,6 +629,10 @@ exports.markStoreArrived = async (req, res) => {
 };
 
 // ── Verify store pickup OTP entered by rider ──────────────────────────────────
+// Single-store orders: verified once and the delivery/order flips to 'picked'
+// (unchanged behavior). Multi-store orders: verifies the CURRENT unverified
+// stop only; the delivery/order only flips to 'picked' once every stop in
+// pickup_progress is verified.
 exports.verifyStoreOtp = async (req, res) => {
   const { id } = req.params; // delivery id
   const { otp } = req.body;
@@ -581,28 +640,68 @@ exports.verifyStoreOtp = async (req, res) => {
     return res.status(400).json({ success: false, message: 'Invalid OTP format' });
   try {
     const rows = await sequelize.query(
-      `SELECT rider_id, store_pickup_otp FROM deliveries WHERE id = :id`,
+      `SELECT d.rider_id, d.store_pickup_otp, d.pickup_progress, o.pickup_route
+       FROM deliveries d JOIN orders o ON o.id = d.order_id
+       WHERE d.id = :id`,
       { replacements: { id }, type: QueryTypes.SELECT }
     );
     if (!rows.length) return res.status(404).json({ success: false, message: 'Delivery not found' });
     const row = rows[0];
     if (row.rider_id !== req.user.id)
       return res.status(403).json({ success: false, message: 'Forbidden' });
-    if (!row.store_pickup_otp || row.store_pickup_otp !== String(otp))
+
+    const isMultiStore = Array.isArray(row.pickup_route) && row.pickup_route.length > 1;
+
+    if (!isMultiStore) {
+      if (!row.store_pickup_otp || row.store_pickup_otp !== String(otp))
+        return res.status(400).json({ success: false, message: 'Incorrect store OTP' });
+
+      await sequelize.query(
+        `UPDATE deliveries SET store_pickup_verified_at = NOW(), status = 'picked' WHERE id = :id`,
+        { replacements: { id }, type: QueryTypes.UPDATE }
+      );
+      // Update order status to picked
+      await sequelize.query(
+        `UPDATE orders SET status = 'picked'
+         WHERE id = (SELECT order_id FROM deliveries WHERE id = :id)`,
+        { replacements: { id }, type: QueryTypes.UPDATE }
+      );
+
+      return res.json({ success: true, message: 'Store pickup confirmed', allStopsComplete: true });
+    }
+
+    // Multi-store: verify the current (first unverified) stop's OTP
+    let pickupProgress = Array.isArray(row.pickup_progress) ? row.pickup_progress : [];
+    const stopIdx = pickupProgress.findIndex((s) => !s.verifiedAt);
+    if (stopIdx === -1) {
+      return res.status(400).json({ success: false, message: 'All store pickups already completed' });
+    }
+    const stop = pickupProgress[stopIdx];
+    if (!stop.otp || stop.otp !== String(otp)) {
       return res.status(400).json({ success: false, message: 'Incorrect store OTP' });
+    }
+    pickupProgress[stopIdx] = { ...stop, verifiedAt: new Date().toISOString() };
+    const allStopsComplete = pickupProgress.every((s) => s.verifiedAt);
 
     await sequelize.query(
-      `UPDATE deliveries SET store_pickup_verified_at = NOW(), status = 'picked' WHERE id = :id`,
-      { replacements: { id }, type: QueryTypes.UPDATE }
+      `UPDATE deliveries SET pickup_progress = :progress${allStopsComplete ? ", status = 'picked'" : ''} WHERE id = :id`,
+      { replacements: { progress: JSON.stringify(pickupProgress), id }, type: QueryTypes.UPDATE }
     );
-    // Update order status to picked
-    await sequelize.query(
-      `UPDATE orders SET status = 'picked'
-       WHERE id = (SELECT order_id FROM deliveries WHERE id = :id)`,
-      { replacements: { id }, type: QueryTypes.UPDATE }
-    );
+    if (allStopsComplete) {
+      await sequelize.query(
+        `UPDATE orders SET status = 'picked'
+         WHERE id = (SELECT order_id FROM deliveries WHERE id = :id)`,
+        { replacements: { id }, type: QueryTypes.UPDATE }
+      );
+    }
 
-    res.json({ success: true, message: 'Store pickup confirmed' });
+    res.json({
+      success: true,
+      message: allStopsComplete ? 'All store pickups confirmed' : 'Store pickup confirmed',
+      allStopsComplete,
+      stopIndex: stopIdx,
+      totalStops: pickupProgress.length,
+    });
   } catch (err) {
     console.error('verifyStoreOtp error:', err.message);
     res.status(500).json({ success: false, message: err.message });
