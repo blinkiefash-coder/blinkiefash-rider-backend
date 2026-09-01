@@ -119,7 +119,7 @@ exports.acceptOrder = async (req, res) => {
       `SELECT id, status FROM orders WHERE id = :orderId FOR UPDATE`,
       { replacements: { orderId }, type: QueryTypes.SELECT, transaction: t }
     );
-    if (!rows.length || rows[0].status !== 'confirmed') {
+    if (!rows.length || !['confirmed', 'packed'].includes(rows[0].status)) {
       await t.rollback();
       return res.status(409).json({ success: false, message: 'Order no longer available' });
     }
